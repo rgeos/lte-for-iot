@@ -1,0 +1,44 @@
+#!/bin/bash -x
+
+PROGRAM=lte_service
+DEVICE=lte_device
+
+LOGFILE="/var/log/${PROGRAM}.log"
+STATE='DOWN'
+echo "${PROGRAM} start" >> ${LOGFILE}
+
+USB_MODEM='11f6:1034'
+
+while [ 1 ]
+do
+   # check if the modem is inserted
+   if [[ -n $(/usr/bin/lsusb -d ${USB_MODEM}) ]]; then
+           if [[ ${STATE} == 'DOWN' ]]; then
+                   echo "LTE Modem Detected" >> ${LOGFILE}
+           fi
+
+           if [[ -n $(/usr/sbin/ifconfig ppp0 2>&1 | grep inet) ]]; then
+
+                   # LTE modem connected
+                   STATE='UP'
+           else
+
+                   # Modem DOWN try to re-connect it
+                   echo "Modem DOWN, try to bring it up" >> ${LOGFILE}
+                   /usr/local/bin/${DEVICE} down 2>/dev/null
+                   /usr/local/bin/${DEVICE} up 2>/dev/null
+
+                   STATE='UP'
+                   sleep 10
+           fi
+   else
+           if [[ ${STATE} == 'UP' ]]; then
+                   
+                   # clean everything
+                   echo "Clean LTE modem state" >> ${LOGFILE}
+                   /usr/local/bin/${DEVICE} down 2>/dev/null
+                   STATE='DOWN'
+           fi
+   fi
+sleep 10
+done 
