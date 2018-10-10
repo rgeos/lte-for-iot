@@ -1,0 +1,120 @@
+#!/bin/bash -x
+
+PIDFILE='/var/run/lte_service.pid'
+LOGFILE='/var/log/lte_service.log'
+RESCONF='/etc/resolv.conf'
+MODEMIF=$(grep '^Modem' /etc/wvdial.conf | awk '{print $3}')
+
+# AT commands
+SIGNAL="AT+CSQ"
+ATTACH="AT+CGATT?"
+PDPCTX="AT+CGACT=?"
+
+# adding the NCXX modem configs
+function modem_add() {
+	echo "Adding necessary configs to the serial USB"
+	chmod 666 /sys/bus/usb-serial/drivers/option1/new_id
+	sleep 1
+
+	echo 0x11f6 0x1034 > /sys/bus/usb-serial/drivers/option1/new_id
+	sleep 2
+
+	echo "USB modeswitch"
+	# make sure you have the configurations for your modem
+	/usr/sbin/usb_modeswitch -I -W -c /etc/usb_modeswitch.conf
+}
+
+# remove NCXX modem
+function modem_remove() {
+	echo "Cleanup the mess"
+	/sbin/rmmod option
+	/sbin/rmmod usb_wwan
+	/sbin/rmmod usbserial
+}
+
+
+# ------------------- #
+### For AT commands ###
+# ------------------- #
+
+function execute_at_command() {
+	echo $1 | atinout - ${MODEMIF} -
+}
+
+function count_lines() {
+	RESPONSE_LINES=$(execute_at_command | paste -d "\r" - - | wc -l)
+	echo ${RESPONSE_LINES}
+}
+
+# check the signal
+function check_signal() {
+	# see if we return two lines, OK and anything but 99,99
+	if [[ $(count_lines ${SIGNAL}) == '2' ]] && [[ -n $(execute_at_command ${SIGNAL} | grep "^OK") ]] && [[ -z $(execute_at_command ${SIGNAL} | grep "99,99") ]]; then
+	   echo "Signal is good"
+	else
+		echo "Something is wrong with the signal"
+		# TODO - we could re-attach
+		exit 0
+	fi
+}
+
+function check_attach() {
+	if [[ $(count_lines ${ATTACH}) == '2' ]] && [[ -n $(execute_at_command ${ATTACH} | grep "^OK") ]] && [[ -z $(execute_at_command ${ATTACH} | grep "0") ]]; then
+		echo "Looks like we are attached"
+	else
+		echo "We are not attached"
+		# TODO - we could re-attach
+		exit 0
+	fi
+}
+
+# check if PDP active
+# execute_at_command ${PDPCTX}
+
+if [[ $1 == 'up' ]]; then
+	# checking if the module option is loaded
+	if [[ -n $(lsmod | grep option) ]]; then
+		modem_add
+	else
+		echo "Seems like the OPTION module is not loaded"
+		modprobe option
+		modem_add
+	fi
+	
+	sleep 2
+	function_check_signal
+
+	### dial up
+	echo "Dial up ... bip bip bip ..."
+	/usr/bin/wvdial net >> ${LOGFILE} 2>&1 &
+	echo $! > ${PIDFILE}
+
+	sleep 2
+	#todo - we need some validation here
+	while [[ -z $(/usr/sbin/ifconfig ppp0 | grep inet) ]]; do
+		echo "Waiting for the connection to come up" >> ${LOGFILE}
+		sleep 2
+	done
+
+	# dns
+	DNS1=$(grep primary ${LOGFILE} | awk '{ print $5 }' | tail -n1)
+	DNS2=$(grep secondary ${LOGFILE} | awk '{ print $5 }' | tail -n1)
+	echo nameserver ${DNS1} > ${RESCONF}
+	echo nameserver ${DNS2} >> ${RESCONF}
+
+	# routing - TODO -make it nicer (do we need this if we have peer DNS working?)
+    LOCAL_IP=$(/usr/sbin/ifconfig ppp0  |awk '/inet / {split($2,a,".");split($2,b,"/");print a[1] "." a[2] "." a[3] ".0/24" b[2]}')	
+	REMOTE_IP=$(/usr/sbin/ifconfig ppp0 | grep inet | awk '{print $6}')
+	/usr/sbin/route add -net ${LOCAL_IP} gateway ${REMOTE_IP} dev ppp0
+
+	exit 0
+fi
+
+if [[ $2 == 'down' ]]; then
+	kill -9 $(cat ${PIDFILE}) 2>/dev/null
+	rm -rf ${PIDFILE}
+
+	modem_remove
+	exit 0
+fi
+
